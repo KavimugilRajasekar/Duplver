@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "duplver"
+version = "0.1.0"
+description = "Enterprise-grade AI image deduplication CLI."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Duplver" }]
+keywords = ["duplicate", "deduplication", "images", "ai", "cli", "perceptual-hash", "clip"]
+
+dependencies = [
+    # CLI
+    "typer>=0.12",
+    "rich>=13.7",
+    # Config
+    "pydantic>=2.6",
+    "pyyaml>=6.0",
+    # Images
+    "pillow>=10.0",
+    "imagehash>=4.3",
+    "opencv-python>=4.9",
+    # AI / search
+    "torch>=2.0",
+    "open_clip_torch>=2.24",
+    "faiss-cpu>=1.8",
+    "numpy>=1.26",
+    # System
+    "psutil>=5.9",
+    "send2trash>=1.8",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.4",
+]
+
+[project.scripts]
+duplver = "duplver.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+duplver = ["schema.sql"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"

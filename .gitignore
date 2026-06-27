@@ -1,0 +1,138 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Duplver — Python / setuptools / uv project
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Byte-compiled / optimized / DLL files ──────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# ── Distribution / packaging ───────────────────────────────────────────────
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+*.egg
+MANIFEST
+
+# ── Virtual environments ───────────────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.python-version
+
+# ── uv / pip cache & lock (keep uv.lock tracked) ───────────────────────────
+.uv-cache/
+.pip-cache/
+.pdm-cache/
+
+# ── Installer logs ─────────────────────────────────────────────────────────
+pip-log.txt
+pip-delete-this-directory.txt
+
+# ── Unit test / coverage reports ───────────────────────────────────────────
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+pytest-results/
+test-results/
+test-reports/
+tests/.pytest_cache/
+
+# ── Linters / formatters / type checkers ───────────────────────────────────
+.ruff_cache/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+cython_debug/
+
+# ── IDEs / editors ─────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# ── Jupyter / notebooks ────────────────────────────────────────────────────
+.ipynb_checkpoints/
+profile_default/
+ipython_config.py
+
+# ── Logs / runtime artefacts ───────────────────────────────────────────────
+*.log
+logs/
+*.pid
+*.seed
+*.pid.lock
+
+# ── OS noise ───────────────────────────────────────────────────────────────
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+[Tt]humbs.db
+[Dd]esktop.ini
+
+# ── Duplver-specific runtime state (per-user, never committed) ─────────────
+# State lives in ~/.duplver/ — outside the repo, but ignore if anyone mounts it
+.duplver/
+duplver_state/
+*.faiss
+*.faiss.ids
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+cache/
+.cache/
+
+# ── Local secrets / environment overrides ──────────────────────────────────
+.env
+.env.*
+!.env.example
+.envrc
+.secrets/
+config.local.yaml
+config.local.yml
+config.local.json
+
+# ── Build / benchmark scratch output ───────────────────────────────────────
+benchmarks/output/
+benchmark_results/
+*.bench.json
+.artifacts/
