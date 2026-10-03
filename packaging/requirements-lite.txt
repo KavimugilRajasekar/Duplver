@@ -1,0 +1,7 @@
+# Build requirements for Duplver-lite.exe (no AI model).
+pillow>=10.3
+pillow-heif>=0.16
+numpy>=1.26
+opencv-python-headless>=4.9
+send2trash>=1.8
+pyinstaller>=6.6

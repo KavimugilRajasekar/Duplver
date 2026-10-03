@@ -1,133 +1,103 @@
 # Duplver
 
-**Enterprise-grade AI image deduplication CLI.** Finds exact, perceptual, and AI-similar duplicate images across massive collections — then safely moves inferior copies to the OS Trash/Recycle Bin.
+**Find, classify and safely clean up duplicate images.** Exact copies, files converted to another format, re-saved, resized, cropped and edited versions, plus visually similar shots. Ships as a single Windows `.exe`. While it scans, the terminal shows each image as it's being processed.
+
+```
+ Duplver · C:\Photos
+
+ ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀  Step 2/4 · Analyzing images
+ ▀▀▀▀▀▀  (the image that is  ▀  ███████████████░░░░░░░░░░░░  52.4%
+ ▀▀▀▀▀▀   being processed,   ▀  2,143 / 4,090  ·  68.4/s  ·  ETA 00:28
+ ▀▀▀▀▀▀   drawn in colour)   ▀
+ ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀  Now  IMG_2041.JPG
+                                   C:\Photos\2023\Trip
+                                   4032×3024 · JPEG · 4.1 MB
+                                   Exact copies spotted: 12
+```
 
 ---
 
-## Pipeline
+## Using the Windows executable
 
-Duplver runs a **7-stage analysis pipeline**, executing stages sequentially and caching results in SQLite so re-runs are incremental (only changed files are reprocessed).
+**Double-click `Duplver.exe`** (or drag a folder onto it) for guided mode: choose a folder, watch the scan, review the results, optionally open a visual HTML report, and optionally move the duplicates aside.
 
-| Stage | Name | Method | Command |
-|-------|------|---------|---------|
-| 1 | **Discovery** | Recursive walk, EXIF + dimension metadata via Pillow | `scan` / `analyze` |
-| 2 | **Exact Hashing** | SHA-256 — atomic read of digest + size, batched DB writes | `scan` / `analyze` |
-| 3 | **Perceptual Hashing** | pHash + dHash + aHash (imagehash); Hamming-distance clustering | `scan` / `analyze` |
-| 4 | **AI Embeddings** | OpenCLIP (`ViT-B-32`) → FAISS `IndexFlatIP` (cosine sim) | `analyze` only |
-| 5 | **Crop Detection** | FAISS top-K neighbour search + pixel-area ratio filter | `analyze` only |
-| 6 | **Feature Matching** | ORB / AKAZE keypoints → Lowe's ratio test → RANSAC homography inliers | `analyze` only |
-| 7 | **Clustering** | Groups exact + perceptual + crop duplicates; quality-scores each member | `scan` / `analyze` |
+From a terminal:
 
-### Quality Scoring
+```bat
+Duplver.exe scan "C:\Photos"              :: find + classify duplicates (live view)
+Duplver.exe results "C:\Photos"           :: show the last scan's findings
+Duplver.exe report "C:\Photos" --open     :: HTML report with thumbnails (also --format csv|json)
+Duplver.exe clean "C:\Photos"             :: preview what would be removed
+Duplver.exe clean "C:\Photos" --apply     :: move duplicates to C:\Photos\_duplver_removed
+Duplver.exe restore "C:\Photos"           :: put them back
+Duplver.exe doctor                        :: check formats, AI model, terminal
+```
 
-Each file in a duplicate cluster is scored 0–100 using a weighted blend:
+Add `-h` to any command for its options. Useful ones: `scan --no-ai` (faster), `scan --rescan` (ignore the cache), `scan --plain` (for logs), `clean --keep largest|newest|oldest`, `clean --recycle-bin`, `clean --include-similar`.
 
-| Component | Weight | Method |
-|-----------|--------|--------|
-| Pixel count | 40% | Log-scaled (0.5 MP → 0, 32 MP → 100) |
-| Sharpness | 30% | Laplacian variance via log₁₀ curve (screenshots, photos, and diagrams all score fairly) |
-| File size | 15% | Log-scaled (0.1 MB → 0, 25 MB → 100) |
-| Format | 15% | PNG > TIFF > WEBP > AVIF > HEIC > JPEG > BMP > GIF |
+## What it detects
 
-The highest-scoring file in each cluster is kept as `role='best'`; the rest become `role='duplicate'`.
+| Label | Meaning | How it's found |
+|---|---|---|
+| **exact copy** | byte-identical file | SHA-256 |
+| **same pixels** | identical picture, other format or metadata (PNG ↔ BMP ↔ TIFF, stripped EXIF, …) | hash of the decoded, orientation-corrected pixels |
+| **re-saved** | same size, recompressed or converted to a lossy format (JPEG ↔ WebP ↔ HEIC) | perceptual hashes (pHash + dHash), unchanged colour |
+| **resized** | same picture at another resolution | perceptual hashes, same aspect ratio |
+| **edited** | brightness/colour/filter or small edits | hashes or AI, confirmed by feature alignment + pixel correlation |
+| **cropped** | a cut-out of a larger image | AI candidate, confirmed by ORB features + RANSAC homography |
+| **similar** | a different shot of the same scene (bursts, re-takes) | AI similarity. **Review only, never removed unless you ask** |
 
----
+Supported formats: JPEG, PNG, WebP, AVIF, HEIC/HEIF, TIFF, BMP, GIF. EXIF rotation is applied and transparency is flattened before comparing, so a rotated phone photo matches its upright export.
 
-## Install
+**Which copy is kept?** The one with the best quality score: resolution 50%, sharpness 25%, file size 15%, format 10%. Files with identical pixels count as equal quality (a PNG export of a JPEG adds nothing), and names like `photo (1).jpg` or `IMG copy.jpg` lose ties to the original.
+
+**Safety.** `clean` only previews unless you pass `--apply`. Files are *moved* into `_duplver_removed\` inside the scanned folder, keeping their sub-folders, so `restore` can undo it. Nothing is deleted permanently. Before each move Duplver re-checks that the file is unchanged since the scan and that the copy being kept still exists. Crops are only accepted when the smaller image has no more resolution than the region it matches. That stops a separately taken zoom shot from being mistaken for a crop and removed.
+
+## How a scan works
+
+1. **Find**: walk the folder (skips hidden folders, `$RECYCLE.BIN`, `_duplver_removed`, …).
+2. **Analyse**: each file is read and decoded once, in parallel. That one pass produces the SHA-256, pixel hash, pHash, dHash, mean colour, sharpness, dimensions, and the live preview.
+3. **AI fingerprints** (full build): CLIP ViT-B-32 embeddings, computed once per distinct picture.
+4. **Match & classify**: exact/pixel groups → perceptual-hash pairs → AI nearest neighbours → geometric verification → groups (spanning tree, so each file gets its strongest relation to the kept copy).
+
+Results are cached per file (path + size + modified time) in `%LOCALAPPDATA%\Duplver` (`~/.duplver` elsewhere). Re-scans only analyse new or changed files, files that disappeared are dropped, and Ctrl+C keeps finished work.
+
+## Building the executable
+
+PyInstaller can't cross-compile, so build **on Windows** (or use the GitHub Action below):
+
+```bat
+build_windows.bat          :: dist\Duplver.exe       — includes AI similarity (~0.6–0.9 GB)
+build_windows.bat lite     :: dist\Duplver-lite.exe  — no AI (~80 MB), starts instantly
+```
+
+The script needs Python 3.10–3.12 from python.org. It creates a private virtual environment and installs the dependencies into it, downloads the CLIP weights once and bundles them (so the exe works offline), runs the tests, builds a single file and checks it with `doctor`.
+
+The lite build still detects exact, same-pixel, re-saved, resized and edited copies. It can't find crops or "similar" shots. The full exe unpacks itself to a temp folder on every start, so expect a few seconds of startup.
+
+**From macOS/Linux:** push the repo to GitHub, open *Actions → Build Windows executable → Run workflow*, and download both `.exe` files from the run's artifacts. Pushing a tag such as `v0.2.0` also triggers it.
+
+## Development
 
 ```bash
-# Recommended: via uv (handles heavy deps like torch automatically)
-uv run duplver --help
-
-# Or standard pip (editable/dev install)
-pip install -e ".[dev]"
+pip install -e ".[ai,dev]"          # or just -e . without the AI extras
+PYTHONPATH=src python -m unittest discover -s tests -v
+python -m duplver scan ~/Pictures
 ```
 
-Requires **Python ≥ 3.10**. Heavy dependencies (torch, open_clip_torch, faiss-cpu) are declared in `pyproject.toml` and installed automatically.
+The tests generate a small photo library (copies, conversions, resizes, edits, rotated and transparent images, blank and corrupt files) and check the classification, keeper choice, cache, reports, and clean/restore end to end. They need only Pillow.
 
----
+| Module | Role |
+|---|---|
+| `cli.py` | commands, guided mode, result printing |
+| `pipeline.py` | scan stages, caching, thread pool |
+| `imaging.py` | decoding, fingerprints, quality score |
+| `matching.py` | relations, thresholds, pair classification |
+| `verify.py` | ORB/RANSAC crop & edit verification (OpenCV) |
+| `ai.py` | optional CLIP embeddings + nearest-neighbour search |
+| `grouping.py` | groups, keeper choice |
+| `cleanup.py` | move / recycle / restore |
+| `report.py`, `results.py` | HTML/CSV/JSON reports, reading results |
+| `ui/` | live terminal view with half-block image preview |
 
-## Quick Start
-
-```bash
-# 1. Verify environment (checks all optional dependencies)
-duplver doctor
-
-# 2. Scan for exact + perceptual duplicates (Stages 1–3 + 7)
-duplver scan --path C:\Photos
-
-# 3. Full AI analysis — also finds crops and similar images (all 7 stages)
-duplver analyze --path C:\Photos
-
-# 4. Skip CLIP/crop stages when torch is not available
-duplver analyze --path C:\Photos --skip-ai
-
-# 5. Inspect results
-duplver stats --path C:\Photos
-
-# 6. Force full re-analysis (ignore cache)
-duplver analyze --path C:\Photos --no-cache
-```
-
-State lives in `~/.duplver/` — one SQLite database per scanned root, plus a FAISS index sidecar.
-
----
-
-## Commands
-
-| Command | Description |
-|---------|-------------|
-| `duplver scan --path <dir>` | Stages 1–3 + 7: discovery, exact & perceptual hashing, clustering |
-| `duplver analyze --path <dir>` | Full 7-stage pipeline including CLIP, crop & feature matching |
-| `duplver analyze --path <dir> --skip-ai` | Stages 1–3 + 7 only (no torch/faiss required) |
-| `duplver cluster --path <dir>` | Rebuild clusters from existing DB without re-hashing |
-| `duplver stats --path <dir>` | Summary statistics from the DB |
-| `duplver review --path <dir>` | Interactive duplicate review |
-| `duplver cleanup --path <dir>` | Move duplicate files to OS Trash |
-| `duplver restore --path <dir>` | Undo a cleanup operation |
-| `duplver report --path <dir>` | Generate a duplicate report |
-| `duplver doctor` | Check environment health (Python, deps, GPU) |
-| `duplver config show` | Print current configuration |
-| `duplver config init` | Write default `~/.duplver/config.yaml` |
-| `duplver benchmark --path <dir>` | Performance benchmark |
-
----
-
-## Configuration
-
-Settings are loaded from `~/.duplver/config.yaml` (auto-created with defaults on first run via `duplver config init`).
-
-```yaml
-# Concurrency (0 = auto from CPU count)
-threads: 0
-
-# Perceptual hashing (Stage 3)
-perceptual_hash_size: 8         # hash bits = size²; 8 → 64-bit
-perceptual_max_distance: 10     # max Hamming distance for near-duplicate
-
-# CLIP AI embeddings (Stage 4)
-clip_model: "ViT-B-32"
-clip_pretrained: "laion2b_s34b_b79k"
-batch_size: 32
-
-# Memory cap
-max_memory_mb: 4096
-
-# Cleanup behaviour
-default_quality_keep: "best"    # best | largest | newest | oldest
-trash_verbosity: true
-```
-
----
-
-## Safety
-
-**Read-only by default.** `duplver` never deletes files. The `cleanup` command moves them to the OS Trash (Windows Recycle Bin / Linux Trash / macOS Trash). The `restore` command reverses this. Permanent deletion requires explicit double confirmation.
-
----
-
-## State & Incremental Runs
-
-All analysis results are persisted in SQLite (`~/.duplver/<root_hash>.db`). Re-running any command only reprocesses files whose `size` or `mtime` has changed since the last run — making large collections fast to re-check.
-
-The FAISS index is written alongside the DB as `<root_hash>.faiss` (+ a `.faiss.ids` sidecar mapping FAISS positions to file IDs).
+Thresholds live in `config.py`.

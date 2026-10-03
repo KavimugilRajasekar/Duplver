@@ -1,94 +1,45 @@
-"""Pydantic settings for Duplver.
+"""Tunable settings for a scan.
 
-Loaded from ~/.duplver/config.yaml if present, otherwise defaults. The
-``duplver config`` command writes a default config file to disk.
+Every threshold lives here so the matching logic has one source of truth.
+The CLI overrides a few of them (threads, AI on/off, similarity).
 """
 from __future__ import annotations
 
 import os
-from pathlib import Path
-from typing import Literal
-
-import yaml
-from pydantic import BaseModel, Field
-
-from duplver.paths import default_state_dir
-
-KeepStrategy = Literal["best", "largest", "newest", "oldest"]
+from dataclasses import dataclass
 
 
-class Settings(BaseModel):
-    """User-tunable settings.
+@dataclass
+class Settings:
+    # Worker threads for decoding/hashing. 0 = auto (CPU count, capped at 8
+    # so peak memory stays bounded while full-resolution images are decoded).
+    threads: int = 0
 
-    All fields have safe defaults that work out-of-the-box on CPU-only systems.
-    """
+    # Ignore the cache and re-analyse every file.
+    rescan: bool = False
 
-    # Concurrency
-    threads: int = Field(
-        default=0,
-        description="Worker thread count. 0 = auto from psutil.cpu_count().",
-    )
+    # Use the CLIP model (if installed / bundled) for crop + similarity search.
+    use_ai: bool = True
 
-    # Perceptual hashing (Stage 3, stubbed in v0.1)
-    perceptual_hash_size: int = Field(default=8)
-    perceptual_max_distance: int = Field(default=10)
+    # Perceptual-hash thresholds: Hamming distance out of 64 bits.
+    # "strict" pairs are near-identical and accepted directly; "loose" pairs
+    # must be confirmed by CLIP or by local-feature (ORB) matching.
+    phash_strict: int = 4
+    dhash_strict: int = 6
+    phash_loose: int = 10
+    dhash_loose: int = 14
 
-    # CLIP embeddings (Stage 4, stubbed in v0.1)
-    clip_model: str = Field(default="ViT-B-32")
-    clip_pretrained: str = Field(default="laion2b_s34b_b79k")
-    batch_size: int = Field(default=32)
+    # CLIP cosine-similarity thresholds.
+    similar_threshold: float = 0.92        # "visually similar" (review only)
+    ai_duplicate_threshold: float = 0.95   # same picture, edited/resized
+    crop_candidate_threshold: float = 0.85 # candidate crop, ORB-verified
+    ai_neighbours: int = 10                # nearest neighbours per image
 
-    # Memory
-    max_memory_mb: int = Field(default=4096)
+    clip_model: str = "ViT-B-32"
+    clip_pretrained: str = "laion2b_s34b_b79k"
+    batch_size: int = 32
 
-    # State
-    state_dir: Path = Field(default_factory=default_state_dir)
-
-    # Cleanup behavior
-    default_quality_keep: KeepStrategy = Field(default="best")
-    trash_verbosity: bool = Field(default=True)
-
-    # Logging
-    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = Field(default="INFO")
-
-    def resolved_threads(self) -> int:
-        """Return the configured thread count, defaulting to psutil.cpu_count()."""
+    def worker_count(self) -> int:
         if self.threads > 0:
             return self.threads
-        try:
-            import psutil  # local import: optional dep at config-load time
-
-            n = psutil.cpu_count(logical=False) or psutil.cpu_count() or 4
-            return max(1, n)
-        except Exception:
-            return 4
-
-
-def config_path(state_dir: Path | None = None) -> Path:
-    """Return the path to the user's config.yaml."""
-    from duplver.paths import ensure_state_dir
-
-    sd = ensure_state_dir(state_dir)
-    return sd / "config.yaml"
-
-
-def load_settings(state_dir: Path | None = None) -> Settings:
-    """Load settings from disk, falling back to defaults."""
-    cp = config_path(state_dir)
-    if not cp.exists():
-        return Settings(state_dir=state_dir or default_state_dir())
-    try:
-        data = yaml.safe_load(cp.read_text(encoding="utf-8")) or {}
-        return Settings(**data)
-    except Exception:
-        # Corrupt config: keep defaults rather than crash.
-        return Settings(state_dir=state_dir or default_state_dir())
-
-
-def save_settings(settings: Settings, state_dir: Path | None = None) -> Path:
-    """Write settings to disk as YAML. Returns the path written."""
-    cp = config_path(state_dir)
-    cp.parent.mkdir(parents=True, exist_ok=True)
-    payload = settings.model_dump(mode="json")
-    cp.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
-    return cp
+        return max(2, min(8, os.cpu_count() or 4))
