@@ -4,50 +4,38 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "duplver"
-version = "0.1.0"
-description = "Enterprise-grade AI image deduplication CLI."
+version = "0.2.0"
+description = "Find, classify and safely clean up duplicate images."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.9"
 license = { text = "MIT" }
 authors = [{ name = "Duplver" }]
-keywords = ["duplicate", "deduplication", "images", "ai", "cli", "perceptual-hash", "clip"]
+keywords = ["duplicate", "deduplication", "images", "perceptual-hash", "clip", "cli"]
 
+# Only Pillow is strictly required; the rest make Duplver faster and smarter
+# and are always included in the Windows executable.
 dependencies = [
-    # CLI
-    "typer>=0.12",
-    "rich>=13.7",
-    # Config
-    "pydantic>=2.6",
-    "pyyaml>=6.0",
-    # Images
-    "pillow>=10.0",
-    "imagehash>=4.3",
-    "opencv-python>=4.9",
-    # AI / search
-    "torch>=2.0",
-    "open_clip_torch>=2.24",
-    "faiss-cpu>=1.8",
-    "numpy>=1.26",
-    # System
-    "psutil>=5.9",
-    "send2trash>=1.8",
+    "pillow>=10.3",
+    "pillow-heif>=0.16",              # HEIC/HEIF (iPhone) photos
+    "numpy>=1.26",                    # fast hash matching
+    "opencv-python-headless>=4.9",    # crop / edit verification
+    "send2trash>=1.8",                # clean --recycle-bin
 ]
 
 [project.optional-dependencies]
-dev = [
-    "pytest>=8.0",
-    "ruff>=0.4",
+ai = [                                # CLIP similarity: crops, heavy edits, similar shots
+    "torch>=2.1",
+    "open_clip_torch>=2.24",
 ]
+build = ["pyinstaller>=6.6"]
+dev = ["pytest>=8.0", "ruff>=0.4"]
 
 [project.scripts]
-duplver = "duplver.cli:app"
+duplver = "duplver.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
-[tool.setuptools.package-data]
-duplver = ["schema.sql"]
-
 [tool.ruff]
-line-length = 100
-target-version = "py310"
+line-length = 110
+target-version = "py39"

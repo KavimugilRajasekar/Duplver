@@ -1,70 +1,146 @@
-"""SQLite connection and migration helpers.
+"""SQLite storage: one database per scanned root, kept in the state dir.
 
-Each scanned root has its own database file. Schema is applied once via
-``init_db``, and a simple ``schema_version`` row in ``meta`` lets future
-versions migrate safely.
+The database is a cache of per-file analysis plus the latest grouping
+result and the cleanup audit log. If the schema version changes the file is
+simply rebuilt — the next scan re-analyses everything.
 """
 from __future__ import annotations
 
+import os
 import sqlite3
-import time
-from importlib import resources
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator
 
-SCHEMA_VERSION = "1"
+from duplver.paths import db_path
 
-_SCHEMA_TEXT = (
-    resources.files("duplver").joinpath("schema.sql").read_text(encoding="utf-8")
-)
+SCHEMA_VERSION = "3"
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS files (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    path        TEXT    UNIQUE NOT NULL,
+    size        INTEGER NOT NULL,
+    mtime       REAL    NOT NULL,
+    seen        INTEGER NOT NULL DEFAULT 0,  -- scan generation that last saw it
+    status      TEXT    NOT NULL,            -- 'ok' | 'error'
+    error       TEXT,
+    sha256      TEXT,                        -- bytes
+    pixel_hash  TEXT,                        -- decoded, orientation-corrected pixels
+    phash       TEXT,                        -- 64-bit DCT hash (hex)
+    dhash       TEXT,                        -- 64-bit gradient hash (hex)
+    flat        INTEGER,                     -- 1 = near-uniform image, hashes unreliable
+    width       INTEGER,
+    height      INTEGER,
+    format      TEXT,
+    sharpness   REAL,
+    tone        TEXT                         -- mean 'R,G,B' (0-255)
+);
+CREATE INDEX IF NOT EXISTS idx_files_sha   ON files(sha256);
+CREATE INDEX IF NOT EXISTS idx_files_pixel ON files(pixel_hash);
+CREATE INDEX IF NOT EXISTS idx_files_seen  ON files(seen);
+
+CREATE TABLE IF NOT EXISTS embeddings (
+    file_id INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
+    model   TEXT NOT NULL,
+    vector  BLOB NOT NULL                    -- float32, L2-normalised
+);
+
+CREATE TABLE IF NOT EXISTS groups (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind        TEXT    NOT NULL,            -- weakest relation in the group
+    keeper_id   INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+    confidence  REAL    NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS group_members (
+    group_id    INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+    file_id     INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+    role        TEXT    NOT NULL,            -- 'keep' | 'duplicate'
+    relation    TEXT    NOT NULL,            -- how it relates to the keeper
+    confidence  REAL    NOT NULL,
+    PRIMARY KEY (group_id, file_id)
+);
+CREATE INDEX IF NOT EXISTS idx_members_file ON group_members(file_id);
+
+CREATE TABLE IF NOT EXISTS actions (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    original_path TEXT    NOT NULL,
+    stored_path   TEXT,                      -- quarantine location (NULL for recycle bin)
+    method        TEXT    NOT NULL,          -- 'quarantine' | 'recycle'
+    at            REAL    NOT NULL,
+    restored      INTEGER NOT NULL DEFAULT 0
+);
+"""
 
 
-def connect(db_path: Path) -> sqlite3.Connection:
-    """Open (and initialize) a database for the given root.
-
-    Creates parent directories if needed. Enables foreign keys, WAL mode,
-    and sets a busy timeout so concurrent readers don't immediately fail.
-    """
-    db_path.parent.mkdir(parents=True, exist_ok=True)
+def _open(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(
-        str(db_path),
+        str(path),
         timeout=30.0,
-        isolation_level=None,  # autocommit; we manage transactions explicitly
+        isolation_level=None,  # autocommit; transactions are explicit
         check_same_thread=False,
     )
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON;")
-    conn.execute("PRAGMA journal_mode = WAL;")
-    conn.execute("PRAGMA synchronous = NORMAL;")
-    _init_schema(conn)
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA synchronous = NORMAL")
     return conn
 
 
-def _init_schema(conn: sqlite3.Connection) -> None:
-    """Apply schema.sql if the DB has never been initialized.
-
-    Order matters: a fresh DB has no ``meta`` table, so the schema_version
-    check can fail with ``OperationalError``. We try the check first (cheap
-    path on already-initialized DBs); on failure we apply the schema, then
-    re-check. ``schema.sql`` uses ``CREATE TABLE IF NOT EXISTS`` everywhere,
-    so re-applying on a half-initialized DB is safe.
-    """
+def _schema_version(conn: sqlite3.Connection) -> str | None:
     try:
         row = conn.execute(
             "SELECT value FROM meta WHERE key = 'schema_version'"
         ).fetchone()
-        if row is not None:
-            return
-    except sqlite3.OperationalError:
-        # ``meta`` doesn't exist yet — apply schema now and insert version rows.
-        conn.executescript(_SCHEMA_TEXT)
-        conn.execute(
-        "INSERT INTO meta(key, value) VALUES ('schema_version', ?)",
-        (SCHEMA_VERSION,),
-    )
-    conn.execute(
-        "INSERT INTO meta(key, value) VALUES ('created_at', ?)",
-        (str(time.time()),),
-    )
+    except sqlite3.DatabaseError:
+        return None
+    return row["value"] if row else None
+
+
+def connect(path: Path) -> sqlite3.Connection:
+    """Open the database at ``path``, (re)creating it if the schema is stale."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = _open(path)
+    if _schema_version(conn) == SCHEMA_VERSION:
+        return conn
+
+    # Missing, older or corrupt: it's only a cache, so start fresh.
+    conn.close()
+    for suffix in ("", "-wal", "-shm"):
+        try:
+            os.remove(str(path) + suffix)
+        except FileNotFoundError:
+            pass
+    conn = _open(path)
+    conn.executescript(_SCHEMA)
+    set_meta(conn, "schema_version", SCHEMA_VERSION)
+    return conn
+
+
+def connect_root(root: Path) -> sqlite3.Connection:
+    return connect(db_path(root))
+
+
+def open_existing(root: Path) -> sqlite3.Connection | None:
+    """Open the database for ``root`` only if a scan has created one."""
+    path = db_path(root)
+    if not path.exists():
+        return None
+    conn = connect(path)
+    if get_meta(conn, "last_scan") is None:
+        return None
+    return conn
+
+
+def get_meta(conn: sqlite3.Connection, key: str) -> str | None:
+    row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else None
 
 
 def set_meta(conn: sqlite3.Connection, key: str, value: str) -> None:
@@ -75,90 +151,12 @@ def set_meta(conn: sqlite3.Connection, key: str, value: str) -> None:
     )
 
 
-def get_meta(conn: sqlite3.Connection, key: str) -> str | None:
-    row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
-    return row["value"] if row else None
-
-
-def upsert_file(
-    conn: sqlite3.Connection,
-    *,
-    path: str,
-    root: str,
-    filename: str,
-    extension: str,
-    size_bytes: int,
-    mtime: float,
-    ctime: float,
-    width: int | None,
-    height: int | None,
-    fmt: str | None,
-    mode: str | None,
-    exif_json: str | None,
-) -> int:
-    """Insert a new files row, or update an existing one if the path is known.
-
-    Returns the row id. A new file starts with status='discovered'.
-    """
-    existing = conn.execute(
-        "SELECT id, size_bytes, mtime FROM files WHERE path = ?", (path,)
-    ).fetchone()
-
-    if existing is None:
-        cur = conn.execute(
-            """
-            INSERT INTO files(
-                path, root, filename, extension, size_bytes, mtime, ctime,
-                width, height, format, mode, exif_json, status, discovered_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'discovered', ?)
-            """,
-            (
-                path,
-                root,
-                filename,
-                extension,
-                size_bytes,
-                mtime,
-                ctime,
-                width,
-                height,
-                fmt,
-                mode,
-                exif_json,
-                time.time(),
-            ),
-        )
-        return int(cur.lastrowid)
-
-    # Only update metadata if size or mtime changed. Otherwise keep existing row.
-    if existing["size_bytes"] != size_bytes or existing["mtime"] != mtime:
-        conn.execute(
-            """
-            UPDATE files SET
-                size_bytes = ?, mtime = ?, ctime = ?, width = ?, height = ?,
-                format = ?, mode = ?, exif_json = ?, status = 'discovered',
-                error = NULL
-            WHERE id = ?
-            """,
-            (
-                size_bytes,
-                mtime,
-                ctime,
-                width,
-                height,
-                fmt,
-                mode,
-                exif_json,
-                existing["id"],
-            ),
-        )
-    return int(existing["id"])
-
-
-def mark_status(
-    conn: sqlite3.Connection, file_id: int, status: str, error: str | None = None
-) -> None:
-    conn.execute(
-        "UPDATE files SET status = ?, error = ? WHERE id = ?",
-        (status, error, file_id),
-    )
+@contextmanager
+def transaction(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
+    conn.execute("BEGIN")
+    try:
+        yield conn
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    conn.execute("COMMIT")

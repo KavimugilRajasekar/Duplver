@@ -1,36 +1,39 @@
-"""Path resolution for state directory and per-root database files."""
+"""State directory, per-root database paths and bundled-resource lookup."""
 from __future__ import annotations
 
 import hashlib
 import os
+import sys
 from pathlib import Path
 
-# Default state directory. On Windows: %USERPROFILE%\.duplver
-# Honors DUPLVER_STATE_DIR env var so tests can redirect.
+# Folder (inside the scanned root) that `clean` moves duplicates into.
+# Discovery always skips it, so removed files never come back as duplicates.
+QUARANTINE_DIRNAME = "_duplver_removed"
+
+# Honors DUPLVER_STATE_DIR so tests (and portable setups) can redirect state.
 _ENV_STATE = "DUPLVER_STATE_DIR"
 
 
-def default_state_dir() -> Path:
-    """Return the default state directory, honoring DUPLVER_STATE_DIR."""
+def state_dir() -> Path:
+    """Return (and create) the directory holding Duplver's databases.
+
+    Windows: %LOCALAPPDATA%\\Duplver.  Elsewhere: ~/.duplver.
+    """
     env = os.environ.get(_ENV_STATE)
     if env:
-        return Path(env).expanduser().resolve()
-    return (Path.home() / ".duplver").resolve()
-
-
-def ensure_state_dir(state_dir: Path | None = None) -> Path:
-    """Return the state directory, creating it if it does not exist."""
-    sd = (state_dir or default_state_dir()).resolve()
-    sd.mkdir(parents=True, exist_ok=True)
-    return sd
+        base = Path(env).expanduser()
+    elif os.name == "nt" and os.environ.get("LOCALAPPDATA"):
+        base = Path(os.environ["LOCALAPPDATA"]) / "Duplver"
+    else:
+        base = Path.home() / ".duplver"
+    base.mkdir(parents=True, exist_ok=True)
+    return base
 
 
 def root_key(root: Path) -> str:
     """Stable, filesystem-safe identifier for a scanned root.
 
-    Uses SHA-256 of the resolved absolute path, hex-truncated to 16 chars.
-    On Windows, paths are case-folded so C:\\Photos and c:\\photos hash to the
-    same key (Windows itself is case-insensitive).
+    On Windows paths are case-folded so C:\\Photos and c:\\photos share a key.
     """
     resolved = str(root.expanduser().resolve())
     if os.name == "nt":
@@ -38,12 +41,16 @@ def root_key(root: Path) -> str:
     return hashlib.sha256(resolved.encode("utf-8")).hexdigest()[:16]
 
 
-def root_paths(root: Path, state_dir: Path | None = None) -> dict[str, Path]:
-    """Return the on-disk paths associated with a scanned root."""
-    sd = ensure_state_dir(state_dir)
-    key = root_key(root)
-    return {
-        "db": sd / f"{key}.db",
-        "faiss": sd / f"{key}.faiss",
-        "meta": sd / f"{key}.meta.json",
-    }
+def db_path(root: Path) -> Path:
+    return state_dir() / f"{root_key(root)}.db"
+
+
+def is_frozen() -> bool:
+    """True when running from the PyInstaller-built executable."""
+    return bool(getattr(sys, "frozen", False))
+
+
+def resource_dir() -> Path:
+    """Directory holding bundled resources (PyInstaller unpacks to _MEIPASS)."""
+    meipass = getattr(sys, "_MEIPASS", None)
+    return Path(meipass) if meipass else Path(__file__).resolve().parent

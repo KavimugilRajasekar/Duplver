@@ -136,3 +136,8 @@ benchmarks/output/
 benchmark_results/
 *.bench.json
 .artifacts/
+
+# ── Duplver build artefacts ────────────────────────────────────────────────
+.build-venv-*/
+packaging/models/
+duplver-report.*

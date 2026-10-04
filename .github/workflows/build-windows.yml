@@ -1,0 +1,32 @@
+# Builds the Windows executables on GitHub's Windows runners, so they can be
+# produced from any OS. Run it from the Actions tab ("Run workflow") or by
+# pushing a tag like v0.2.0; download the .exe files from the run's artifacts.
+name: Build Windows executable
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [full, lite]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build
+        shell: cmd
+        env:
+          PYTHON: python
+        run: build_windows.bat ${{ matrix.variant }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: duplver-${{ matrix.variant }}
+          path: dist/*.exe
+          if-no-files-found: error

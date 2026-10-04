@@ -1,89 +1,155 @@
-"""Reporting — JSON, CSV, HTML writers.
-
-**Status: stubbed for CSV and HTML.** The JSON path is exercised by the
-verification flow; CSV and HTML will be filled in once ``cleanup`` is real.
-"""
+"""Reports: self-contained HTML (with thumbnails), CSV and JSON."""
 from __future__ import annotations
 
 import csv
+import html
 import json
-import sqlite3
+from dataclasses import asdict
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Sequence
 
-from rich.console import Console
-from rich.panel import Panel
+from duplver.imaging import thumbnail_data_uri
+from duplver.matching import LABELS
+from duplver.results import GroupView, Summary
+from duplver.ui.term import human_bytes
 
-# Stable column order for cluster rows.
-_CLUSTER_COLUMNS: tuple[str, ...] = (
-    "cluster_id",
-    "kind",
-    "detection_method",
-    "confidence",
-    "best_file",
-    "members",
-    "savings_bytes",
-)
+FORMATS = ("html", "csv", "json")
 
 
-def export_json(conn: sqlite3.Connection, out_path: Path) -> Path:
-    """Write a JSON report of all clusters to ``out_path``. Returns the path."""
-    rows = conn.execute(
-        """
-        SELECT c.id AS cluster_id, c.kind, c.detection_method, c.confidence,
-               bf.path AS best_file,
-               COUNT(cm.file_id) AS members,
-               COALESCE(SUM(CASE WHEN cm.file_id != c.best_file_id
-                            THEN f.size_bytes ELSE 0 END), 0) AS savings_bytes
-        FROM clusters c
-        LEFT JOIN files bf ON bf.id = c.best_file_id
-        LEFT JOIN cluster_members cm ON cm.cluster_id = c.id
-        LEFT JOIN files f ON f.id = cm.file_id
-        GROUP BY c.id
-        ORDER BY savings_bytes DESC, c.id
-        """
-    ).fetchall()
+def _label(relation: str) -> str:
+    return LABELS.get(relation, relation)
+
+
+def write_json(path: Path, root: Path, summary: Summary, groups: Sequence[GroupView]) -> None:
     payload = {
-        "clusters": [
+        "root": str(root),
+        "summary": asdict(summary),
+        "groups": [
             {
-                "cluster_id": r["cluster_id"],
-                "kind": r["kind"],
-                "detection_method": r["detection_method"],
-                "confidence": r["confidence"],
-                "best_file": r["best_file"],
-                "members": r["members"],
-                "savings_bytes": r["savings_bytes"],
+                "id": g.id,
+                "kind": g.kind,
+                "confidence": g.confidence,
+                "savings_bytes": 0 if g.is_similar else g.savings,
+                "members": [
+                    {
+                        "path": m.path,
+                        "keep": m.file_id == g.keeper_id,
+                        "relation": m.relation,
+                        "confidence": m.confidence,
+                        "size_bytes": m.size,
+                        "width": m.width,
+                        "height": m.height,
+                        "format": m.format,
+                        "quality": m.quality,
+                    }
+                    for m in g.members
+                ],
             }
-            for r in rows
-        ]
+            for g in groups
+        ],
     }
-    out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    return out_path
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
-def export_csv(conn: sqlite3.Connection, out_path: Path) -> Path:
-    """Stubbed CSV export. Writes a header row and a 'coming soon' notice."""
-    out_path.write_text(
-        "# duplver report — CSV export coming in the next phase.\n", encoding="utf-8"
-    )
-    return out_path
+def write_csv(path: Path, groups: Sequence[GroupView]) -> None:
+    with path.open("w", newline="", encoding="utf-8-sig") as f:  # BOM: Excel-friendly
+        w = csv.writer(f)
+        w.writerow(["group", "group_kind", "action", "relation", "confidence",
+                    "path", "size_bytes", "width", "height", "format", "quality"])
+        for g in groups:
+            for m in g.members:
+                action = "keep" if m.file_id == g.keeper_id else ("review" if g.is_similar else "remove")
+                w.writerow([g.id, g.kind, action, m.relation, m.confidence, m.path,
+                            m.size, m.width, m.height, m.format, m.quality])
 
 
-def export_html(conn: sqlite3.Connection, out_path: Path) -> Path:
-    """Stubbed HTML export. Writes a minimal placeholder document."""
-    out_path.write_text(
-        "<!doctype html><html><body><h1>duplver report</h1>"
-        "<p>HTML export coming in the next phase.</p></body></html>",
-        encoding="utf-8",
-    )
-    return out_path
+_CSS = """
+:root{--bg:#f6f7f9;--card:#fff;--text:#1d2330;--muted:#677087;--line:#e3e6ec;
+--keep:#1f9d55;--dup:#d64545;--sim:#b7791f;--accent:#2563eb}
+@media (prefers-color-scheme:dark){:root{--bg:#12151b;--card:#1b2029;--text:#e6e9ef;
+--muted:#9aa3b5;--line:#2a313d;--keep:#3ccf7d;--dup:#ff6b6b;--sim:#f0b44c;--accent:#6ea0ff}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);
+font:14px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+main{max-width:1200px;margin:0 auto;padding:24px 16px 64px}
+h1{font-size:22px;margin:0 0 4px}h2{font-size:17px;margin:32px 0 12px}
+.muted{color:var(--muted)}.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
+gap:10px;margin:16px 0}.stat{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px}
+.stat b{display:block;font-size:20px}.group{background:var(--card);border:1px solid var(--line);
+border-radius:12px;margin:14px 0;padding:14px}.ghead{display:flex;flex-wrap:wrap;gap:8px 16px;
+align-items:baseline;margin-bottom:10px}.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:12px}
+.card{border:2px solid var(--line);border-radius:10px;overflow:hidden;min-width:0}
+.card.keep{border-color:var(--keep)}.card.dup{border-color:var(--dup)}.card.sim{border-color:var(--sim)}
+.thumb{height:170px;display:flex;align-items:center;justify-content:center;background:repeating-conic-gradient(#8881 0 25%,#0000 0 50%) 0 0/16px 16px}
+.thumb img{max-width:100%;max-height:170px}.info{padding:8px 10px;font-size:12.5px}
+.badge{display:inline-block;font-size:11px;font-weight:600;padding:1px 7px;border-radius:99px;color:#fff}
+.b-keep{background:var(--keep)}.b-dup{background:var(--dup)}.b-sim{background:var(--sim)}
+.path{word-break:break-all;color:var(--muted);margin-top:4px}code{font-size:12px}
+nav a{color:var(--accent);margin-right:14px}
+"""
 
 
-def report_panel(console: Console, message: str) -> None:
-    console.print(
-        Panel(
-            message,
-            title="duplver report",
-            border_style="yellow",
-        )
-    )
+def write_html(
+    path: Path,
+    root: Path,
+    summary: Summary,
+    groups: Sequence[GroupView],
+    on_progress: Callable[[int, int], None] | None = None,
+) -> None:
+    esc = html.escape
+    total = sum(len(g.members) for g in groups)
+    done = 0
+    parts = [
+        "<!doctype html><html lang='en'><head><meta charset='utf-8'>",
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>",
+        f"<title>Duplver report</title><style>{_CSS}</style></head><body><main>",
+        "<h1>Duplver report</h1>",
+        f"<div class='muted'>{esc(str(root))} · scanned {esc(summary.last_scan or '?')}"
+        f" · AI similarity: {esc(summary.ai or 'off')}</div>",
+        "<div class='stats'>",
+    ]
+    for label, value in [
+        ("Images", f"{summary.images:,}"),
+        ("Duplicate groups", f"{summary.dup_groups:,}"),
+        ("Duplicate files", f"{summary.dup_files:,}"),
+        ("Reclaimable", human_bytes(summary.reclaimable)),
+        ("Similar groups", f"{summary.similar_groups:,}"),
+        ("Unreadable", f"{summary.unreadable:,}"),
+    ]:
+        parts.append(f"<div class='stat'><span class='muted'>{label}</span><b>{value}</b></div>")
+    parts.append("</div>")
+    if summary.by_relation:
+        parts.append("<div class='muted'>Duplicates by type: " + " · ".join(
+            f"{esc(_label(r))} <b>{n:,}</b>" for r, n in summary.by_relation.items()) + "</div>")
+    parts.append("<nav><a href='#dups'>Duplicate groups</a><a href='#similar'>Similar groups</a></nav>")
+
+    for section, title, wanted in (("dups", "Duplicate groups", False), ("similar", "Similar groups (review only)", True)):
+        parts.append(f"<h2 id='{section}'>{title}</h2>")
+        chosen = [g for g in groups if g.is_similar == wanted]
+        if not chosen:
+            parts.append("<p class='muted'>None found.</p>")
+        for i, g in enumerate(chosen, 1):
+            kinds = ", ".join(_label(r) for r in g.relations)
+            saving = "" if g.is_similar else f" · saves <b>{human_bytes(g.savings)}</b>"
+            parts.append(
+                f"<section class='group'><div class='ghead'><b>#{i}</b><span>{esc(kinds)}</span>"
+                f"<span class='muted'>{len(g.members)} files{saving} · confidence {g.confidence * 100:.0f}%</span></div>"
+                "<div class='cards'>"
+            )
+            for m in g.members:
+                keep = m.file_id == g.keeper_id
+                cls, badge = ("keep", "KEEP") if keep else (("sim", "SIMILAR") if g.is_similar else ("dup", "DUPLICATE"))
+                uri = thumbnail_data_uri(m.path)
+                img = f"<img loading='lazy' src='{uri}' alt=''>" if uri else "<span class='muted'>no preview</span>"
+                detail = "" if keep else f" · {esc(_label(m.relation))} ({m.confidence * 100:.0f}%)"
+                parts.append(
+                    f"<div class='card {cls}'><div class='thumb'>{img}</div><div class='info'>"
+                    f"<span class='badge b-{cls}'>{badge}</span>{detail}<br>"
+                    f"{m.width}×{m.height} · {esc(m.format)} · {human_bytes(m.size)} · quality {m.quality:.0f}"
+                    f"<div class='path'><code>{esc(m.path)}</code></div></div></div>"
+                )
+                done += 1
+                if on_progress:
+                    on_progress(done, total)
+            parts.append("</div></section>")
+    parts.append("</main></body></html>")
+    path.write_text("".join(parts), encoding="utf-8")

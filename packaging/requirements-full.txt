@@ -1,0 +1,6 @@
+# Build requirements for Duplver.exe (with CLIP AI similarity).
+# On Windows the PyPI torch wheel is the CPU build, which keeps the exe small
+# enough; CUDA is not needed for this workload.
+-r requirements-lite.txt
+torch>=2.1
+open_clip_torch>=2.24

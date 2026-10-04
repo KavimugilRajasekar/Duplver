@@ -1,3 +1,4 @@
+"""PyInstaller entry point (absolute imports; the package's __main__ uses the same code)."""
 import multiprocessing
 import sys
 
